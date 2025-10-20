@@ -184,6 +184,143 @@ app.get('/api/conversations/:userCode', async (req, res) => {
   }
 });
 
+// ==================== ADMIN ENDPOINTS ====================
+
+// Get all users (Admin only)
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT five_digit_code as code, name, created_at as created FROM users ORDER BY created_at DESC'
+    );
+    
+    // Format the response
+    const users = result.rows.map(user => ({
+      ...user,
+      created: new Date(user.created).toLocaleDateString(),
+      status: 'active'
+    }));
+    
+    res.json(users);
+  } catch (error) {
+    console.error('Admin users error:', error);
+    res.status(500).json({ error: 'Failed to load users: ' + error.message });
+  }
+});
+
+// Get all messages (Admin only)
+app.get('/api/admin/messages', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT m.*, 
+             u1.name as from_name,
+             u2.name as to_name
+      FROM messages m
+      LEFT JOIN users u1 ON m.from_user = u1.five_digit_code
+      LEFT JOIN users u2 ON m.to_user = u2.five_digit_code
+      ORDER BY m.timestamp DESC
+    `);
+    
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Admin messages error:', error);
+    res.status(500).json({ error: 'Failed to load messages: ' + error.message });
+  }
+});
+
+// Delete user (Admin only)
+app.delete('/api/admin/users/:code', async (req, res) => {
+  const { code } = req.params;
+  
+  try {
+    // Start a transaction
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Delete user's messages
+      await client.query(
+        'DELETE FROM messages WHERE from_user = $1 OR to_user = $1',
+        [code]
+      );
+      
+      // Delete user
+      await client.query(
+        'DELETE FROM users WHERE five_digit_code = $1',
+        [code]
+      );
+      
+      await client.query('COMMIT');
+      res.json({ success: true, message: `User ${code} deleted successfully` });
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    console.error('Delete user error:', error);
+    res.status(500).json({ error: 'Failed to delete user: ' + error.message });
+  }
+});
+
+// Delete message (Admin only)
+app.delete('/api/admin/messages/:id', async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    const result = await pool.query(
+      'DELETE FROM messages WHERE id = $1 RETURNING *',
+      [id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+    
+    res.json({ success: true, message: 'Message deleted successfully' });
+  } catch (error) {
+    console.error('Delete message error:', error);
+    res.status(500).json({ error: 'Failed to delete message: ' + error.message });
+  }
+});
+
+// Get system statistics (Admin only)
+app.get('/api/admin/stats', async (req, res) => {
+  try {
+    // Get total users
+    const usersResult = await pool.query('SELECT COUNT(*) as count FROM users');
+    const totalUsers = parseInt(usersResult.rows[0].count);
+    
+    // Get total messages
+    const messagesResult = await pool.query('SELECT COUNT(*) as count FROM messages');
+    const totalMessages = parseInt(messagesResult.rows[0].count);
+    
+    // Get active chats (unique conversation pairs)
+    const chatsResult = await pool.query(`
+      SELECT COUNT(DISTINCT 
+        CASE 
+          WHEN from_user < to_user THEN from_user || '_' || to_user 
+          ELSE to_user || '_' || from_user 
+        END
+      ) as count FROM messages
+    `);
+    const activeChats = parseInt(chatsResult.rows[0].count);
+    
+    res.json({
+      totalUsers,
+      totalMessages,
+      activeChats
+    });
+    
+  } catch (error) {
+    console.error('Admin stats error:', error);
+    res.status(500).json({ error: 'Failed to load stats: ' + error.message });
+  }
+});
+
 // Health check endpoint
 app.get('/health', async (req, res) => {
   try {
@@ -198,4 +335,10 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`SoConnect backend running on port ${PORT}`);
   console.log('Database URL:', process.env.DATABASE_URL ? 'Set' : 'Not set');
+  console.log('Admin endpoints available at:');
+  console.log('  GET  /api/admin/users');
+  console.log('  GET  /api/admin/messages');
+  console.log('  GET  /api/admin/stats');
+  console.log('  DELETE /api/admin/users/:code');
+  console.log('  DELETE /api/admin/messages/:id');
 });
